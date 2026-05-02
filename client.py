@@ -1,6 +1,6 @@
 """
 五子棋联机游戏 — 客户端 (tkinter GUI)。
-包含连接界面、游戏棋盘、网络通信、心跳、快捷键等功能。
+连接界面、游戏棋盘、网络通信、心跳、胜利结算动画、再来一局。
 绝不在子线程操作 UI，统一通过 root.after() 调度。
 """
 
@@ -14,6 +14,7 @@ from protocol import (
     recv_message, pack_message,
     CMD_CONNECT, CMD_PLACE, CMD_UNDO, CMD_RESIGN,
     CMD_BROADCAST, CMD_HEARTBEAT, CMD_ERROR, CMD_GAME_START,
+    CMD_REMATCH, CMD_REMATCH_ACK,
 )
 
 BOARD_SIZE = 15
@@ -24,13 +25,12 @@ PADDING = 30
 PIECE_RADIUS = 17
 TURN_TIME_LIMIT = 30
 
-# 颜色映射常量
 BLACK = 1
 WHITE = 2
 
 
 def str_to_board(s: str):
-    """从字符串反序列化棋盘（与服务器端保持一致）。"""
+    """从字符串反序列化棋盘。"""
     board = [[0] * BOARD_SIZE for _ in range(BOARD_SIZE)]
     rows = s.split(";")
     for r, row_str in enumerate(rows):
@@ -45,14 +45,11 @@ def str_to_board(s: str):
 
 
 def board_diff(old_board, new_board):
-    """比较新旧棋盘，返回 (action, row, col, color)。
-    action: 'place' 落子, 'undo' 悔棋, None 无变化。"""
-    # 检测落子
+    """比较新旧棋盘，返回 (action, row, col, color)。"""
     for r in range(BOARD_SIZE):
         for c in range(BOARD_SIZE):
             if old_board[r][c] == 0 and new_board[r][c] != 0:
                 return ('place', r, c, new_board[r][c])
-    # 检测悔棋（棋子消失）
     for r in range(BOARD_SIZE):
         for c in range(BOARD_SIZE):
             if old_board[r][c] != 0 and new_board[r][c] == 0:
@@ -68,7 +65,7 @@ class GomokuClient:
 
         self.sock: socket.socket | None = None
         self.running = False
-        self.my_color = 0           # 1=黑, 2=白, 0=旁观
+        self.my_color = 0
         self.my_nickname = ""
         self.opponent_nickname = ""
         self.board = [[0] * BOARD_SIZE for _ in range(BOARD_SIZE)]
@@ -77,13 +74,11 @@ class GomokuClient:
         self.game_over = False
         self.game_result = "未分胜负"
 
-        # 线程安全消息队列（接收线程 → 主线程）
+        # 消息队列（子线程 → 主线程）
         self.msg_queue = deque()
         self.queue_lock = threading.Lock()
 
         self.last_heartbeat_ack = time.time()
-
-        # 防抖
         self._last_place_time = 0.0
 
         # 重连
@@ -92,12 +87,19 @@ class GomokuClient:
         self.max_reconnect = 3
 
         # 落子记录
-        self.move_history: list[tuple[int, int, int]] = []  # (color, row, col)
+        self.move_history: list[tuple[int, int, int]] = []
 
         # 倒计时
         self._countdown_value = TURN_TIME_LIMIT
         self._countdown_job = None
         self.countdown_running = False
+
+        # 胜利动画
+        self._celebration_job = None
+        self._celebration_dots: list[int] = []
+
+        # 再来一局
+        self._rematch_status = ""  # "" / "waiting_self" / "waiting_opp"
 
         self._setup_connect_screen()
 
@@ -216,7 +218,6 @@ class GomokuClient:
             self.msg_queue.append(msg)
 
     def _process_queue(self):
-        """主线程定时消费消息队列。"""
         try:
             with self.queue_lock:
                 while self.msg_queue:
@@ -240,28 +241,27 @@ class GomokuClient:
                 self._handle_broadcast(data)
             elif cmd == CMD_GAME_START:
                 self._handle_game_start(data)
+            elif cmd == CMD_REMATCH_ACK:
+                self._handle_rematch_ack(data)
             elif cmd == CMD_ERROR:
                 messagebox.showinfo("提示", data)
                 if "断开" in data or "终止" in data:
                     self._show_game_terminated(data)
 
     # ═══════════════════════════════════════════════
-    #  消息处理
+    #  棋盘广播处理
     # ═══════════════════════════════════════════════
     def _handle_broadcast(self, data: str):
-        # 数据格式: board_str|turn_str|result|current_turn
         parts = data.split("|")
         if len(parts) < 4:
             return
-        # 最后三个字段是 turn_str, result, current_turn；前面的是 board_str
         *board_parts, turn_str, result, current_turn_str = parts
-        board_str = "|".join(board_parts)  # 如果 board_str 本身含 | 也能正确还原
+        board_str = "|".join(board_parts)
         self.prev_board = [row[:] for row in self.board]
         self.board = str_to_board(board_str)
         self.current_turn = int(current_turn_str)
         self.game_result = result
 
-        # 检测变化并记录历史
         action, r, c, color = board_diff(self.prev_board, self.board)
         if action == 'place':
             self.move_history.append((color, r, c))
@@ -272,36 +272,70 @@ class GomokuClient:
                     del self.move_history[i]
                     break
             self._reset_countdown()
-        # 无变化时不动倒计时
-
-        if result != "未分胜负":
-            self.game_over = True
-            self._stop_countdown()
-        else:
-            self._start_countdown()
-        # 注: _start_countdown 内部有幂等处理，不会重复启动
 
         self._draw_board()
         self._update_move_log()
 
-        if not self.game_over:
+        if result != "未分胜负":
+            if not self.game_over:
+                self.game_over = True
+                self._stop_countdown()
+                self._show_game_over_overlay(result)
+        else:
+            self.game_over = False
+            self._hide_game_over_overlay()
+            self._start_countdown()
             turn_display = {1: "●黑棋", 2: "○白棋"}.get(self.current_turn, "?")
             self._update_status(f"当前回合: {turn_display}")
-        else:
+
+        if self.game_over:
             self._update_status(f"游戏结束: {result}")
+        elif not self.game_over:
+            turn_display = {1: "●黑棋", 2: "○白棋"}.get(self.current_turn, "?")
+            self._update_status(f"当前回合: {turn_display}")
 
     def _handle_game_start(self, data: str):
         parts = data.split("|")
         if len(parts) >= 3:
             self.my_color = int(parts[0])
-            color_name = parts[1]
             self.opponent_nickname = parts[2]
-            color_symbol = "●" if self.my_color == BLACK else "○" if self.my_color == WHITE else "◎"
-            title = f"我方: {color_symbol}{self.my_nickname}   VS  对手: {self.opponent_nickname}"
+            color_symbol = {BLACK: "●", WHITE: "○"}.get(self.my_color, "◎")
+            color_name = {BLACK: "黑棋", WHITE: "白棋", 0: "旁观"}.get(self.my_color, "?")
+            title = f"我方: {color_symbol}{self.my_nickname}({color_name})   VS  对手: {self.opponent_nickname}"
             self._update_players_display(title)
         self.game_over = False
+        self._hide_game_over_overlay()
+        self._rematch_status = ""
         self.move_history.clear()
+        self._update_move_log()
         self._start_countdown()
+
+    # ═══════════════════════════════════════════════
+    #  再来一局
+    # ═══════════════════════════════════════════════
+    def _handle_rematch_ack(self, data: str):
+        if data == "waiting_self":
+            self._rematch_status = "waiting_self"
+            self._update_rematch_panel("已发送请求，等待对方回应...", False)
+        elif data.startswith("waiting|"):
+            self._rematch_status = "waiting_opp"
+            self._update_rematch_panel("对方想要再来一局！", True)
+        elif data == "reject":
+            self._rematch_status = ""
+            self._update_rematch_panel("对方拒绝了再来一局", False)
+        elif data == "reject_self":
+            self._rematch_status = ""
+            self._update_rematch_panel("已取消", False)
+
+    def _request_rematch(self):
+        if not self.sock:
+            return
+        self._send_raw(pack_message(CMD_REMATCH, "yes"))
+
+    def _reject_rematch(self):
+        if not self.sock:
+            return
+        self._send_raw(pack_message(CMD_REMATCH, "no"))
 
     # ═══════════════════════════════════════════════
     #  重连
@@ -333,7 +367,6 @@ class GomokuClient:
         self._countdown_value = TURN_TIME_LIMIT
         self.countdown_running = True
         self.timer_label.config(text=f"⏱ {self._countdown_value}s")
-        # 取消旧定时器，启动新定时器
         if hasattr(self, '_countdown_job') and self._countdown_job:
             self.root.after_cancel(self._countdown_job)
         self._tick_countdown()
@@ -344,6 +377,9 @@ class GomokuClient:
 
     def _stop_countdown(self):
         self.countdown_running = False
+        if hasattr(self, '_countdown_job') and self._countdown_job:
+            self.root.after_cancel(self._countdown_job)
+            self._countdown_job = None
 
     def _tick_countdown(self):
         if not self.countdown_running or self.game_over:
@@ -358,6 +394,159 @@ class GomokuClient:
         self._countdown_job = self.root.after(1000, self._tick_countdown)
 
     # ═══════════════════════════════════════════════
+    #  胜利结算动画
+    # ═══════════════════════════════════════════════
+    def _show_game_over_overlay(self, result: str):
+        """在棋盘上画出结算遮罩和动画。"""
+        board_px = BOARD_SIZE * CELL_SIZE + PADDING * 2
+
+        # 半透明遮罩
+        self.canvas.create_rectangle(
+            0, 0, board_px, board_px,
+            fill="", outline="", tags="overlay"
+        )
+
+        # 深色半透明背景条
+        bar_top = board_px // 2 - 55
+        self.canvas.create_rectangle(
+            20, bar_top, board_px - 20, bar_top + 110,
+            fill="#1a1a1acc", outline="", tags="overlay"
+        )
+
+        # 结果文字
+        result_text = result
+        if "黑" in result:
+            emoji = "🖤"
+        elif "白" in result:
+            emoji = "🤍"
+        else:
+            emoji = "🤝"
+
+        self.canvas.create_text(
+            board_px // 2, bar_top + 35,
+            text=f"{emoji}  {result_text}  {emoji}",
+            font=("", 20, "bold"), fill="#FFD700", tags="overlay",
+        )
+
+        # 再来一局按钮
+        btn_y = bar_top + 72
+        self.canvas.create_rectangle(
+            board_px // 2 - 90, btn_y - 13, board_px // 2 - 10, btn_y + 13,
+            fill="#4CAF50", outline="", tags=("overlay", "rematch_yes_btn")
+        )
+        self.canvas.create_text(
+            board_px // 2 - 50, btn_y,
+            text="再来一局", font=("", 11, "bold"), fill="white",
+            tags=("overlay", "rematch_yes_btn")
+        )
+
+        self.canvas.create_rectangle(
+            board_px // 2 + 10, btn_y - 13, board_px // 2 + 90, btn_y + 13,
+            fill="#888", outline="", tags=("overlay", "rematch_no_btn")
+        )
+        self.canvas.create_text(
+            board_px // 2 + 50, btn_y,
+            text="离开", font=("", 11, "bold"), fill="white",
+            tags=("overlay", "rematch_no_btn")
+        )
+
+        # 点击事件绑定到 overlay 上的按钮区域
+        self.canvas.tag_bind("rematch_yes_btn", "<Button-1>", lambda e: self._request_rematch())
+        self.canvas.tag_bind("rematch_no_btn", "<Button-1>", lambda e: self._on_close())
+
+        # 小字提示
+        status_y = btn_y + 28
+        self.canvas.create_text(
+            board_px // 2, status_y,
+            text="", font=("", 9), fill="#CCC",
+            tags=("overlay", "rematch_status_text")
+        )
+
+        # 启动庆祝粒子
+        self._start_celebration()
+
+    def _hide_game_over_overlay(self):
+        self._stop_celebration()
+        self.canvas.delete("overlay")
+
+    def _update_rematch_panel(self, status_text: str, show_accept: bool):
+        """更新结算叠加层上的状态文字。"""
+        board_px = BOARD_SIZE * CELL_SIZE + PADDING * 2
+
+        # 清除旧的状态和按钮
+        self.canvas.delete("rematch_extra")
+
+        status_y = board_px // 2 + 100
+        self.canvas.create_text(
+            board_px // 2, status_y,
+            text=status_text, font=("", 9), fill="#CCC",
+            tags=("overlay", "rematch_extra")
+        )
+
+        if show_accept:
+            btn_y = status_y + 25
+            self.canvas.create_rectangle(
+                board_px // 2 + 10, btn_y - 13, board_px // 2 + 90, btn_y + 13,
+                fill="#4CAF50", outline="", tags=("overlay", "rematch_extra", "accept_btn")
+            )
+            self.canvas.create_text(
+                board_px // 2 + 50, btn_y,
+                text="接受", font=("", 11, "bold"), fill="white",
+                tags=("overlay", "rematch_extra", "accept_btn")
+            )
+            self.canvas.tag_bind("accept_btn", "<Button-1>", lambda e: self._request_rematch())
+
+    def _start_celebration(self):
+        """落子闪烁 + 随机彩色粒子动画。"""
+        self._celebration_dots = []
+        board_px = BOARD_SIZE * CELL_SIZE + PADDING * 2
+        import random
+        for _ in range(30):
+            x = random.randint(30, board_px - 30)
+            y = random.randint(30, board_px - 30)
+            r = random.randint(3, 7)
+            color = random.choice(["#FFD700", "#FF6B6B", "#4FC3F7", "#81C784",
+                                    "#FFB74D", "#BA68C8", "#FFF176"])
+            dot_id = self.canvas.create_oval(
+                x - r, y - r, x + r, y + r,
+                fill=color, outline="", tags=("overlay", "confetti")
+            )
+            self._celebration_dots.append({
+                "id": dot_id, "x": x, "y": y, "r": r,
+                "dx": random.uniform(-3, 3),
+                "dy": random.uniform(-5, -1),
+                "life": random.randint(20, 50),
+            })
+        self._animate_celebration()
+
+    def _animate_celebration(self):
+        board_px = BOARD_SIZE * CELL_SIZE + PADDING * 2
+        to_remove = []
+        for dot in self._celebration_dots:
+            dot["life"] -= 1
+            dot["x"] += dot["dx"]
+            dot["y"] += dot["dy"]
+            dot["dy"] += 0.2  # 重力
+            r = dot["r"]
+            if dot["life"] <= 0:
+                to_remove.append(dot)
+                self.canvas.delete(dot["id"])
+            elif 0 < dot["x"] < board_px and 0 < dot["y"] < board_px:
+                self.canvas.coords(dot["id"], dot["x"] - r, dot["y"] - r, dot["x"] + r, dot["y"] + r)
+
+        for d in to_remove:
+            self._celebration_dots.remove(d)
+
+        if self._celebration_dots:
+            self._celebration_job = self.root.after(40, self._animate_celebration)
+
+    def _stop_celebration(self):
+        if self._celebration_job:
+            self.root.after_cancel(self._celebration_job)
+            self._celebration_job = None
+        self.canvas.delete("confetti")
+
+    # ═══════════════════════════════════════════════
     #  游戏界面
     # ═══════════════════════════════════════════════
     def _setup_game_screen(self):
@@ -365,7 +554,6 @@ class GomokuClient:
         board_px = BOARD_SIZE * CELL_SIZE + PADDING * 2
         self.root.geometry(f"{board_px + 220}x{board_px + 60}")
 
-        # 顶部信息栏
         info_frame = tk.Frame(self.root)
         info_frame.pack(side="top", fill="x", padx=10, pady=5)
 
@@ -378,7 +566,10 @@ class GomokuClient:
         self.timer_label = tk.Label(info_frame, text="", font=("", 12, "bold"), fg="#D32F2F")
         self.timer_label.pack(side="right")
 
-        # 主区域
+        self.reconnect_btn = tk.Button(
+            info_frame, text="手动重连", command=self._manual_reconnect,
+            bg="#2196F3", fg="white")
+
         main_frame = tk.Frame(self.root)
         main_frame.pack(side="top")
 
@@ -388,7 +579,6 @@ class GomokuClient:
         self.canvas.bind("<Button-1>", self._on_click)
         self._draw_board()
 
-        # 右侧面板
         panel = tk.Frame(main_frame, width=200)
         panel.pack(side="right", fill="y", padx=(10, 0))
 
@@ -419,12 +609,6 @@ class GomokuClient:
         self.move_listbox = tk.Listbox(panel, height=14, width=22, font=("", 8))
         self.move_listbox.pack(pady=3, fill="both", expand=True)
 
-        # 底部重连按钮（默认隐藏）
-        self.reconnect_btn = tk.Button(
-            info_frame, text="手动重连", command=self._manual_reconnect,
-            bg="#2196F3", fg="white")
-
-        # 快捷键
         self.root.bind("<Control-r>", lambda e: self._send_cmd(CMD_UNDO))
         self.root.bind("<Control-R>", lambda e: self._send_cmd(CMD_UNDO))
         self.root.bind("<Control-g>", lambda e: self._confirm_resign())
@@ -437,21 +621,23 @@ class GomokuClient:
     #  棋盘绘制
     # ═══════════════════════════════════════════════
     def _draw_board(self):
-        self.canvas.delete("all")
+        self.canvas.delete("board")
         board_width = (BOARD_SIZE - 1) * CELL_SIZE
 
         for i in range(BOARD_SIZE):
             coord = PADDING + i * CELL_SIZE
-            self.canvas.create_line(PADDING, coord, PADDING + board_width, coord, fill="#555")
-            self.canvas.create_line(coord, PADDING, coord, PADDING + board_width, fill="#555")
+            self.canvas.create_line(PADDING, coord, PADDING + board_width, coord,
+                                    fill="#555", tags="board")
+            self.canvas.create_line(coord, PADDING, coord, PADDING + board_width,
+                                    fill="#555", tags="board")
 
-        # 星位
         star_points = [(3, 3), (3, 7), (3, 11), (7, 3), (7, 7), (7, 11),
                        (11, 3), (11, 7), (11, 11)]
         for r, c in star_points:
             cx = PADDING + c * CELL_SIZE
             cy = PADDING + r * CELL_SIZE
-            self.canvas.create_oval(cx - 3, cy - 3, cx + 3, cy + 3, fill="#333", outline="")
+            self.canvas.create_oval(cx - 3, cy - 3, cx + 3, cy + 3,
+                                    fill="#333", outline="", tags="board")
 
         for r in range(BOARD_SIZE):
             for c in range(BOARD_SIZE):
@@ -466,7 +652,7 @@ class GomokuClient:
         self.canvas.create_oval(
             cx - PIECE_RADIUS, cy - PIECE_RADIUS,
             cx + PIECE_RADIUS, cy + PIECE_RADIUS,
-            fill=fill, outline=outline, width=2
+            fill=fill, outline=outline, width=2, tags="board"
         )
 
     # ═══════════════════════════════════════════════
@@ -474,8 +660,7 @@ class GomokuClient:
     # ═══════════════════════════════════════════════
     def _on_click(self, event):
         if self.game_over:
-            messagebox.showinfo("提示", "游戏已结束")
-            return
+            return  # 结算遮罩上的点击由 tag_bind 处理
         if self.my_color == 0:
             messagebox.showinfo("提示", "您正在观战，无法落子")
             return
@@ -523,7 +708,7 @@ class GomokuClient:
             self._send_cmd(CMD_RESIGN)
 
     # ═══════════════════════════════════════════════
-    #  UI 更新辅助
+    #  UI 更新
     # ═══════════════════════════════════════════════
     def _update_status(self, text: str):
         try:
@@ -587,6 +772,7 @@ class GomokuClient:
     def _on_close(self):
         self.running = False
         self._stop_countdown()
+        self._stop_celebration()
         if self.sock:
             try:
                 self.sock.close()

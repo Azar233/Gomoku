@@ -13,6 +13,7 @@ from protocol import (
     recv_message, pack_message,
     CMD_CONNECT, CMD_PLACE, CMD_UNDO, CMD_RESIGN,
     CMD_BROADCAST, CMD_HEARTBEAT, CMD_ERROR, CMD_GAME_START, CMD_UNDO_RESULT,
+    CMD_REMATCH, CMD_REMATCH_ACK,
 )
 
 HOST = "0.0.0.0"
@@ -45,6 +46,19 @@ class GameRoom:
         self.turn_start_time = 0.0
         self.undo_count = {1: 0, 2: 0}  # 每方已悔棋次数
         self.move_history: list[tuple[int, int, int]] = []  # [(color, row, col), ...]
+        self.rematch_ready: set[int] = set()  # 已准备再来一局的玩家颜色 (1=黑,2=白)
+
+    def reset(self):
+        """重置房间状态，保留玩家和旁观者。黑棋先行。"""
+        self.board = [[0] * BOARD_SIZE for _ in range(BOARD_SIZE)]
+        self.current_turn = 1
+        self.game_over = False
+        self.winner = None
+        self.last_move = None
+        self.turn_start_time = time.time()
+        self.undo_count = {1: 0, 2: 0}
+        self.move_history = []
+        self.rematch_ready = set()
 
 
 # ── 游戏逻辑助手 ──────────────────────────────────────────
@@ -400,26 +414,57 @@ def handle_client(conn: socket.socket, addr):
                         update_score(opp.nickname, "win")
                 broadcast_state(room)
 
+            # ── 再来一局 ──
+            elif cmd == CMD_REMATCH:
+                if player_index is None:
+                    continue
+                with room.lock:
+                    if not room.game_over:
+                        send_error(player, "游戏尚未结束")
+                        continue
+                    choice = payload.strip().lower()
+                    if choice == "yes":
+                        room.rematch_ready.add(player.color)
+                        opp = room.players[1 - player_index]
+                        if opp:
+                            send_to_player(opp, pack_message(
+                                CMD_REMATCH_ACK, f"waiting|{player.color}"))
+                        send_to_player(player, pack_message(
+                            CMD_REMATCH_ACK, "waiting_self"))
+                        # 双方都准备了 → 开始新局
+                        if room.rematch_ready == {1, 2}:
+                            room.reset()
+                            time.sleep(0.3)  # 给客户端动画留时间
+                            broadcast_game_start(room)
+                    elif choice == "no":
+                        # 一方拒绝
+                        opp = room.players[1 - player_index]
+                        if opp:
+                            send_to_player(opp, pack_message(CMD_REMATCH_ACK, "reject"))
+                        send_to_player(player, pack_message(CMD_REMATCH_ACK, "reject_self"))
+
     except Exception as e:
         print(f"[异常] {player.nickname} ({addr}): {e}")
     finally:
         print(f"[断开] {player.nickname} ({addr}) 断开连接")
         if room is not None:
-            # 如果是玩家离开，通知另一方游戏终止
             if player_index is not None:
                 with room.lock:
-                    if not room.game_over:
+                    was_still_playing = not room.game_over
+                    if was_still_playing:
                         room.game_over = True
-                        room.winner = None  # 对方因对手离开获胜？标记为异常终止
-                opp = room.players[1 - player_index] if room.players else None
-                if opp:
-                    send_to_player(opp, pack_message(CMD_ERROR, "对手已断开连接，游戏终止"))
-                broadcast_state(room)
-            # 从房间移除
-            with room.lock:
-                if player_index is not None:
+                        room.winner = None  # 异常终止
+                if was_still_playing:
+                    opp = room.players[1 - player_index] if room.players else None
+                    if opp:
+                        send_to_player(opp, pack_message(CMD_ERROR, "对手已断开连接，游戏终止"))
+                    broadcast_state(room)
+                # 重置本方的 rematch 标记
+                with room.lock:
+                    room.rematch_ready.discard(player.color)
                     room.players[player_index] = None
-                else:
+            else:
+                with room.lock:
                     try:
                         room.spectators.remove(player)
                     except ValueError:

@@ -23,11 +23,14 @@ CMD_HEARTBEAT = 0x06          # 心跳指令   (数据: 空)
 CMD_ERROR   = 0x07            # 错误提示   (数据: 错误消息)
 CMD_GAME_START = 0x08         # 游戏开始通知
 CMD_UNDO_RESULT = 0x09        # 悔棋结果 (数据: 更新后的棋盘状态)
+CMD_REMATCH = 0x0A            # 请求再来一局 (数据: "yes" 或 "no")
+CMD_REMATCH_ACK = 0x0B        # 再来一局状态通知 (数据: "waiting|1" 对方已准备 / "start" 开始新局 / "reject" 对方拒绝)
 
 CMD_NAMES = {
     0x01: "CONNECT", 0x02: "PLACE", 0x03: "UNDO",
     0x04: "RESIGN", 0x05: "BROADCAST", 0x06: "HEARTBEAT",
     0x07: "ERROR", 0x08: "GAME_START", 0x09: "UNDO_RESULT",
+    0x0A: "REMATCH", 0x0B: "REMATCH_ACK",
 }
 
 
