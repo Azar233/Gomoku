@@ -266,12 +266,14 @@ class GomokuClient:
         if action == 'place':
             self.move_history.append((color, r, c))
             self._reset_countdown()
+            print(f"[DEBUG] 棋盘更新：放置 ({r}, {c})，颜色 {color}，结果 {result}")
         elif action == 'undo':
             for i in range(len(self.move_history) - 1, -1, -1):
                 if self.move_history[i][1] == r and self.move_history[i][2] == c:
                     del self.move_history[i]
                     break
             self._reset_countdown()
+            print(f"[DEBUG] 棋盘更新：悔棋 ({r}, {c})")
 
         self._draw_board()
         self._update_move_log()
@@ -280,6 +282,7 @@ class GomokuClient:
             if not self.game_over:
                 self.game_over = True
                 self._stop_countdown()
+                print(f"[DEBUG] 游戏结束：{result}，设置 game_over=True")
                 self._show_game_over_overlay(result)
         else:
             self.game_over = False
@@ -410,7 +413,7 @@ class GomokuClient:
         bar_top = board_px // 2 - 55
         self.canvas.create_rectangle(
             20, bar_top, board_px - 20, bar_top + 110,
-            fill="#1a1a1acc", outline="", tags="overlay"
+            fill="#2d2d2d", outline="#555555", tags="overlay"
         )
 
         # 结果文字
@@ -659,17 +662,21 @@ class GomokuClient:
     #  点击交互
     # ═══════════════════════════════════════════════
     def _on_click(self, event):
+        print(f"[DEBUG] Canvas 点击事件：({event.x}, {event.y})，game_over={self.game_over}")
+        # 检查点击是否在遮罩按钮上（遮罩显示时的点击由 tag_bind 处理）
         if self.game_over:
-            return  # 结算遮罩上的点击由 tag_bind 处理
+            print(f"[DEBUG] 游戏已结束 (game_over={self.game_over})，忽略点击")
+            return
         if self.my_color == 0:
             messagebox.showinfo("提示", "您正在观战，无法落子")
             return
         if self.current_turn != self.my_color:
-            messagebox.showinfo("提示", "现在不是您的回合")
+            messagebox.showinfo("提示", f"现在不是您的回合（当前回合：{self.current_turn}，您的颜色：{self.my_color}）")
             return
 
         now = time.time()
         if now - self._last_place_time < 0.5:
+            print(f"[DEBUG] 点击频率过快，忽略")
             return
         self._last_place_time = now
 
@@ -677,11 +684,13 @@ class GomokuClient:
         row = round((event.y - PADDING) / CELL_SIZE)
 
         if not (0 <= row < BOARD_SIZE and 0 <= col < BOARD_SIZE):
+            print(f"[DEBUG] 点击越界：({row}, {col})")
             return
         if self.board[row][col] != 0:
-            messagebox.showinfo("提示", "该位置已有棋子")
+            messagebox.showinfo("提示", f"该位置已有棋子 ({row}, {col})")
             return
 
+        print(f"[DEBUG] 放置棋子: ({row}, {col}), 我的颜色: {self.my_color}, 当前回合: {self.current_turn}")
         self._send_raw(pack_message(CMD_PLACE, f"{row},{col}"))
 
     def _send_cmd(self, cmd: int):

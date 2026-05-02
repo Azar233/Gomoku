@@ -152,13 +152,13 @@ def save_scores(scores: dict):
         print(f"[警告] 保存计分失败: {e}")
 
 
-def update_score(nickname: str, result: str):
-    """result: 'win', 'draw', 'loss'"""
+def update_score(nickname: str, key: str):
+    """key: 'wins', 'draws', 'losses'"""
     with score_lock:
         scores = load_scores()
         if nickname not in scores:
             scores[nickname] = {"wins": 0, "draws": 0, "losses": 0}
-        scores[nickname][f"{result}s"] += 1
+        scores[nickname][key] += 1
         save_scores(scores)
 
 
@@ -352,18 +352,22 @@ def handle_client(conn: socket.socket, addr):
                     room.undo_count[player.color] = 0  # 落子后重置对方悔棋计数（只有对方能悔）
                     room.move_history.append((player.color, row, col))
                     # 胜负判定
-                    if check_win(room.board, row, col, player.color):
+                    is_win = check_win(room.board, row, col, player.color)
+                    print(f"[SERVER] {player.nickname} 放置 ({row}, {col})，颜色 {player.color}，五连检查: {is_win}")
+
+                    if is_win:
                         room.game_over = True
                         room.winner = player.color
                         winner_name = player.nickname
                         loser_name = room.players[1 - player_index].nickname if room.players[1 - player_index] else ""
-                        update_score(winner_name, "win")
-                        update_score(loser_name, "loss")
+                        print(f"[SERVER] 房间{room.room_id} 游戏结束！{winner_name} 赢了")
+                        update_score(winner_name, "wins")
+                        update_score(loser_name, "losses")
                     elif is_board_full(room.board):
                         room.game_over = True
                         room.winner = 0
-                        update_score(room.players[0].nickname, "draw")
-                        update_score(room.players[1].nickname, "draw")
+                        update_score(room.players[0].nickname, "draws")
+                        update_score(room.players[1].nickname, "draws")
                     else:
                         room.current_turn = 3 - room.current_turn  # 切换回合
                         room.turn_start_time = time.time()
@@ -408,16 +412,17 @@ def handle_client(conn: socket.socket, addr):
                         continue
                     room.game_over = True
                     room.winner = 3 - player.color  # 对手获胜
-                    update_score(player.nickname, "loss")
+                    update_score(player.nickname, "losses")
                     opp = room.players[1 - player_index]
                     if opp:
-                        update_score(opp.nickname, "win")
+                        update_score(opp.nickname, "wins")
                 broadcast_state(room)
 
             # ── 再来一局 ──
             elif cmd == CMD_REMATCH:
                 if player_index is None:
                     continue
+                start_new_game = False
                 with room.lock:
                     if not room.game_over:
                         send_error(player, "游戏尚未结束")
@@ -431,17 +436,17 @@ def handle_client(conn: socket.socket, addr):
                                 CMD_REMATCH_ACK, f"waiting|{player.color}"))
                         send_to_player(player, pack_message(
                             CMD_REMATCH_ACK, "waiting_self"))
-                        # 双方都准备了 → 开始新局
                         if room.rematch_ready == {1, 2}:
                             room.reset()
-                            time.sleep(0.3)  # 给客户端动画留时间
-                            broadcast_game_start(room)
+                            start_new_game = True
                     elif choice == "no":
-                        # 一方拒绝
                         opp = room.players[1 - player_index]
                         if opp:
                             send_to_player(opp, pack_message(CMD_REMATCH_ACK, "reject"))
                         send_to_player(player, pack_message(CMD_REMATCH_ACK, "reject_self"))
+                if start_new_game:
+                    time.sleep(0.3)
+                    broadcast_game_start(room)
 
     except Exception as e:
         print(f"[异常] {player.nickname} ({addr}): {e}")
@@ -483,13 +488,12 @@ def timeout_monitor():
         time.sleep(5)
         with rooms_lock:
             for room in list(rooms.values()):
+                should_broadcast = False
                 with room.lock:
                     if room.game_over or None in room.players:
                         continue
                     elapsed = time.time() - room.turn_start_time
                     if elapsed > TIMEOUT_SECONDS:
-                        timeout_player = room.players[1 - room.current_turn] if room.current_turn == 1 else room.players[0]
-                        # 更准确：找到当前回合对应的玩家
                         current_color = room.current_turn
                         current_idx = 0 if room.players[0] and room.players[0].color == current_color else 1
                         timeout_player = room.players[current_idx]
@@ -497,11 +501,13 @@ def timeout_monitor():
                             print(f"[超时] {timeout_player.nickname} 落子超时")
                             room.game_over = True
                             room.winner = 3 - current_color
-                            update_score(timeout_player.nickname, "loss")
+                            update_score(timeout_player.nickname, "losses")
                             opp = room.players[1 - current_idx]
                             if opp:
-                                update_score(opp.nickname, "win")
-                            broadcast_state(room)
+                                update_score(opp.nickname, "wins")
+                            should_broadcast = True
+                if should_broadcast:
+                    broadcast_state(room)
 
 
 # ── 主函数 ────────────────────────────────────────────────
