@@ -401,7 +401,7 @@ def handle_client(conn: socket.socket, addr):
                         room.move_history.pop()
                     room.turn_start_time = time.time()
                 broadcast_state(room)
-
+            
             # ── 认输 ──
             elif cmd == CMD_RESIGN:
                 if player_index is None:

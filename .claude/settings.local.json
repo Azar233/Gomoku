@@ -1,0 +1,9 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(python -m py_compile e:/Gomoku/client.py)",
+      "Bash(python -m py_compile e:/Gomoku/client_net.py)",
+      "Bash(python -m py_compile e:/Gomoku/client_ui.py)"
+    ]
+  }
+}
