@@ -12,6 +12,7 @@ from typing import Tuple, Optional
 # ── 常量定义 ──────────────────────────────────────────────
 MAGIC = b'\x58\x51'          # 魔数 "XQ"
 HEADER_SIZE = 7               # 头部固定长度
+MAX_PAYLOAD_SIZE = 64 * 1024  # 单条消息最大载荷（64KB）
 
 # 指令类型
 CMD_CONNECT = 0x01            # 客户端连接 (数据: 昵称)
@@ -25,12 +26,13 @@ CMD_GAME_START = 0x08         # 游戏开始通知
 CMD_UNDO_RESULT = 0x09        # 悔棋结果 (数据: 更新后的棋盘状态)
 CMD_REMATCH = 0x0A            # 请求再来一局 (数据: "yes" 或 "no")
 CMD_REMATCH_ACK = 0x0B        # 再来一局状态通知 (数据: "waiting|1" 对方已准备 / "start" 开始新局 / "reject" 对方拒绝)
+CMD_TIME_LIMIT = 0x0C         # 回合限时设置 (数据: "秒数|操作者昵称")
 
 CMD_NAMES = {
     0x01: "CONNECT", 0x02: "PLACE", 0x03: "UNDO",
     0x04: "RESIGN", 0x05: "BROADCAST", 0x06: "HEARTBEAT",
     0x07: "ERROR", 0x08: "GAME_START", 0x09: "UNDO_RESULT",
-    0x0A: "REMATCH", 0x0B: "REMATCH_ACK",
+    0x0A: "REMATCH", 0x0B: "REMATCH_ACK", 0x0C: "TIME_LIMIT",
 }
 
 
@@ -48,6 +50,8 @@ def parse_header(header: bytes) -> Tuple[int, int]:
     magic, cmd, length = struct.unpack(">2s B I", header)
     if magic != MAGIC:
         raise ValueError(f"Invalid magic number: {magic!r}")
+    if length > MAX_PAYLOAD_SIZE:
+        raise ValueError(f"Payload too large: {length}")
     return cmd, length
 
 
