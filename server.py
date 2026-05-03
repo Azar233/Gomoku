@@ -1,6 +1,6 @@
 """
 五子棋联机游戏 — 服务器端。
-支持多房间、观战、悔棋、认输、心跳检测、落子超时、计分持久化。
+支持多房间、悔棋、认输、心跳检测、落子超时、计分持久化。
 """
 
 import socket
@@ -32,11 +32,10 @@ Player = namedtuple("Player", ["conn", "addr", "nickname", "color"])
 
 # ── 游戏房间 ──────────────────────────────────────────────
 class GameRoom:
-    """单个房间，包含棋盘状态、两名玩家、旁观者列表。"""
+    """单个房间，包含棋盘状态、两名玩家。"""
     def __init__(self, room_id: int):
         self.room_id = room_id
         self.players: list[Player | None] = [None, None]  # 黑(1) / 白(2)
-        self.spectators: list[Player] = []
         self.board = [[0] * BOARD_SIZE for _ in range(BOARD_SIZE)]
         self.current_turn = 1           # 1=黑棋先行
         self.game_over = False
@@ -49,7 +48,7 @@ class GameRoom:
         self.rematch_ready: set[int] = set()  # 已准备再来一局的玩家颜色 (1=黑,2=白)
 
     def reset(self):
-        """重置房间状态，保留玩家和旁观者。黑棋先行。"""
+        """重置房间状态，保留玩家。黑棋先行。"""
         self.board = [[0] * BOARD_SIZE for _ in range(BOARD_SIZE)]
         self.current_turn = 1
         self.game_over = False
@@ -182,7 +181,7 @@ def cleanup_room(room: GameRoom):
     with rooms_lock:
         with room.lock:
             has_players = any(p is not None for p in room.players)
-        if not has_players and not room.spectators:
+        if not has_players:
             rooms.pop(room.room_id, None)
 
 
@@ -196,12 +195,10 @@ def send_to_player(player: Player, msg: bytes):
 
 
 def broadcast_to_room(room: GameRoom, msg: bytes):
-    """向房间内所有玩家和旁观者广播。"""
+    """向房间内所有玩家广播。"""
     for p in room.players:
         if p is not None:
             send_to_player(p, msg)
-    for p in room.spectators:
-        send_to_player(p, msg)
 
 
 def send_error(player: Player, error_msg: str):
@@ -239,12 +236,6 @@ def broadcast_game_start(room: GameRoom):
             opp_name = opponent.nickname if opponent else "等待中"
             data = f"{color}|{color_name}|{opp_name}"
             send_to_player(p, pack_message(CMD_GAME_START, data))
-    # 旁观者也收到开始通知
-    for p in room.spectators:
-        p1 = room.players[0]
-        p2 = room.players[1]
-        data = f"0|旁观|{p1.nickname if p1 else '?'} vs {p2.nickname if p2 else '?'}"
-        send_to_player(p, pack_message(CMD_GAME_START, data))
     broadcast_state(room)
 
 
@@ -280,20 +271,11 @@ def handle_client(conn: socket.socket, addr):
                     player_index = i
                     player = player._replace(color=i + 1)
                     break
-            if player_index is None:
-                room.spectators.append(player)
-                is_spectator = True
-                is_game_ready = False
-            else:
-                is_spectator = False
-                is_game_ready = all(p is not None for p in room.players)
-                if is_game_ready:
-                    room.turn_start_time = time.time()
+            is_game_ready = all(p is not None for p in room.players)
+            if is_game_ready:
+                room.turn_start_time = time.time()
 
-        if is_spectator:
-            print(f"[房间{room.room_id}] {nickname} 作为旁观者加入")
-            broadcast_state(room)  # broadcast_state 内部自带锁
-        elif is_game_ready:
+        if is_game_ready:
             print(f"[房间{room.room_id}] 游戏开始: {room.players[0].nickname} vs {room.players[1].nickname}")
             broadcast_game_start(room)  # broadcast_game_start → broadcast_state 内部自带锁
         else:
@@ -316,11 +298,6 @@ def handle_client(conn: socket.socket, addr):
                 continue
 
             if room is None:
-                continue
-
-            # 旁观者只能收广播、发心跳
-            if player_index is None and cmd not in (CMD_HEARTBEAT,):
-                send_error(player, "您是旁观者，无法操作")
                 continue
 
             # ── 落子 ──
@@ -468,12 +445,6 @@ def handle_client(conn: socket.socket, addr):
                 with room.lock:
                     room.rematch_ready.discard(player.color)
                     room.players[player_index] = None
-            else:
-                with room.lock:
-                    try:
-                        room.spectators.remove(player)
-                    except ValueError:
-                        pass
             cleanup_room(room)
         try:
             conn.close()

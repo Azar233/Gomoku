@@ -3,7 +3,14 @@
     "allow": [
       "Bash(python -m py_compile e:/Gomoku/client.py)",
       "Bash(python -m py_compile e:/Gomoku/client_net.py)",
-      "Bash(python -m py_compile e:/Gomoku/client_ui.py)"
+      "Bash(python -m py_compile e:/Gomoku/client_ui.py)",
+      "Bash(python -m py_compile e:/Gomoku/server.py)",
+      "Bash(python3 skills/ui-ux-pro-max/scripts/search.py \"glassmorphism game board elegant frosted\" --design-system -p \"Gomoku\" -f markdown)",
+      "Bash(python skills/ui-ux-pro-max/scripts/search.py \"glassmorphism game board elegant frosted\" --design-system -p \"Gomoku\" -f markdown)",
+      "Bash(python \"C:/Users/ASUS/.claude/skills/ui-ux-pro-max/scripts/search.py\" \"glassmorphism game board elegant frosted\" --design-system -p \"Gomoku\" -f markdown)",
+      "Bash(python -m py_compile client_ui.py)",
+      "Bash(python -m py_compile client_net.py)",
+      "Bash(python -m py_compile client.py)"
     ]
   }
 }

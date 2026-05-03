@@ -90,6 +90,7 @@ class GomokuClient:
             'on_resign_confirm': self._on_resign_confirm,
             'on_rematch_yes': self._on_rematch_yes,
             'on_rematch_no': self._on_close,
+            'on_rematch_reject': self._on_rematch_reject,
             'on_reconnect': self._on_manual_reconnect,
             'on_time_change': self._on_time_change,
             'on_size_change': self._on_size_change,
@@ -200,7 +201,7 @@ class GomokuClient:
             self.my_color = int(parts[0])
             self.opponent_nickname = parts[2]
             color_symbol = {BLACK: "●", WHITE: "○"}.get(self.my_color, "◎")
-            color_name = {BLACK: "黑棋", WHITE: "白棋", 0: "旁观"}.get(self.my_color, "?")
+            color_name = {BLACK: "黑棋", WHITE: "白棋"}.get(self.my_color, "?")
             title = f"我方: {color_symbol}{self.my_nickname}({color_name})   VS  对手: {self.opponent_nickname}"
             self.ui.update_players_display(title)
         self.game_over = False
@@ -216,16 +217,18 @@ class GomokuClient:
     def _handle_rematch_ack(self, data: str):
         if data == "waiting_self":
             self._rematch_status = "waiting_self"
-            self.ui.update_rematch_panel("已发送请求，等待对方回应...", False)
+            self.ui.update_rematch_panel("已发送请求，等待对方回应...",
+                                         show_reject=True)
         elif data.startswith("waiting|"):
             self._rematch_status = "waiting_opp"
-            self.ui.update_rematch_panel("对方想要再来一局！", True)
+            self.ui.update_rematch_panel("对方想要再来一局！",
+                                         show_accept=True, show_reject=True)
         elif data == "reject":
             self._rematch_status = ""
-            self.ui.update_rematch_panel("对方拒绝了再来一局", False)
+            self.ui.update_rematch_panel("对方拒绝了再来一局")
         elif data == "reject_self":
             self._rematch_status = ""
-            self.ui.update_rematch_panel("已取消", False)
+            self.ui.update_rematch_panel("已取消")
 
     # ═══════════════════════════════════════════════════
     #  用户操作回调
@@ -249,9 +252,6 @@ class GomokuClient:
             return
         if not (0 <= row < BOARD_SIZE and 0 <= col < BOARD_SIZE):
             print(f"[DEBUG] 点击越界：({row}, {col})")
-            return
-        if self.my_color == 0:
-            self.ui.notify("您正在观战，无法落子", "warn")
             return
         if self.current_turn != self.my_color:
             self.ui.notify("现在不是您的回合", "warn")
@@ -278,9 +278,6 @@ class GomokuClient:
     def _on_resign(self):
         if self.game_over or not self.net.is_connected:
             return
-        if self.my_color == 0:
-            self.ui.notify("旁观者不能认输", "warn")
-            return
         self.ui.show_confirm_overlay()
 
     def _on_resign_confirm(self):
@@ -290,6 +287,11 @@ class GomokuClient:
         if not self.net.is_connected:
             return
         self.net.send_raw(pack_message(CMD_REMATCH, "yes"))
+
+    def _on_rematch_reject(self):
+        if not self.net.is_connected:
+            return
+        self.net.send_raw(pack_message(CMD_REMATCH, "no"))
 
     def _on_time_change(self, seconds: int):
         import client_ui
